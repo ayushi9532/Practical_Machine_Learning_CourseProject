@@ -1,0 +1,168 @@
+---
+title: "Practical Machine Learning assignment Writeup"
+author: "Ayushi Mehrotra"
+date: "21/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The aim of the final project for the Practical Machine Learning course is to verify whether it is possible to understand whether the exercises were conducted correctly from the data provided by devices such as Jawbone Up and Fitbit.
+
+The steps to follow to complete an analysis of this kind were outlined in the course and they are: query, data input, characteristics, algorithm, parameters and assessment; so I will follow this sequence for my task, but not point by point.
+
+### Question
+
+According to the afore mentioned study: "Six young health participants were asked to perform a series of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different ways: precisely in accordance with the requirements (Class A), by throwing the elbows to the front (Class B), by lifting the dumbbell halfway (Class C), by lowering the dumbbell halfway (Class D) and by throwing the hips to the f."
+Class A corresponds to the exercise execution listed, while the other four classes correspond to common errors.
+Our aim is to anticipate the way they did the exercise.
+
+### Retrive and cleaning Data 
+
+So, loading all the library needed and then retrieving the data is the first thing.
+This original source is the data for this project: http:/groupware.les.inf.puc-rio.br / har.
+
+```{r}
+library(data.table)
+library(mlbench)
+library(caret)
+library(klaR)
+library(randomForest)
+library(rattle)
+library(rpart)
+library(rpart.plot)
+```
+
+The training data for this project are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+I don't need to download the data in my pc, I can load them to memory.
+
+```{r}
+TrainingData <- fread("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", header=T, na.strings=c("NA","#DIV/0!",""))
+TestingData <- fread("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", header=T, na.strings=c("NA","#DIV/0!",""))
+dim(TrainingData)
+dim(TestingData)
+```
+
+"Now, I use the" summary(Training Date) "and" str(Training Date) "commands to look at the data and, since I have 160 columns, I extract the column names.
+I do not include the "summary" and "str" outputs because these commands extract a lot of rows, but I think it is useful to know the list of names.
+
+```{r}
+names(TrainingData)
+```
+
+So I have many columns with "NA" values, and several columns also contain steps that at this time do not concern me (I want the belt, arm and forearm variables).
+The next move, therefore, is to construct a subset of data with measurements that interest me and add the "result" column.
+The first thing to do is to use "sapply" on the TrainingData and extract all NA or blank variables, then use the list to sub-set the main data set. 
+
+```{r}
+List_Na <- sapply(TrainingData, function (x) any(is.na(x)))
+newTrainingData <- subset(TrainingData, select=c("classe", names(List_Na)[!List_Na & grepl("belt|[^(fore)]arm|dumbbell|forearm", names(List_Na))]))
+```
+
+Then, I have to convert class to a data type of Factor, so that caret generates a classification rather than a regression model.
+
+```{r}
+newTrainingData <- newTrainingData[, classe := factor(newTrainingData[, classe])]
+newTrainingData[, .N, classe]
+```
+The last thing to do is divide the training data into two batches, 60% training data and 40% test data.
+```{r}
+inTrain <- createDataPartition(newTrainingData$classe, p=0.6, list=FALSE)
+Train_data <- newTrainingData[inTrain, ]
+Test_data <- newTrainingData[-inTrain, ]
+```
+
+Then I check if in my batch there are near-zero variance predictors
+```{r}
+nzv <- nearZeroVar(Train_data, saveMetrics=TRUE)
+nzv
+```
+I don't have any predictors with near-zero variance so I can proceed with building my model.
+
+### Building Model
+
+To fit a model to the data I use the function "train" and a partial least squares discriminant analysis (PLSDA) model to start.
+
+```{r}
+set.seed(12345)
+ctrl <- trainControl(method = "repeatedcv", repeats = 3, classProbs = TRUE, summaryFunction = defaultSummary)
+plsFit <- train(classe ~ ., data = Train_data, method = "pls", tuneLength = 15, trControl = ctrl, metric = "ROC", preProc = c("center","scale"))
+plsFit
+```
+
+The grid of outcomes in this output is the average resampled performance estimates.
+Then I use "predict" on my test data to apply the model.
+
+```{r}
+plsClasses <- predict(plsFit, newdata = Test_data)
+str(plsClasses)
+```
+I can also calculate this using the option type = "prob" to compute class probabilities from the model.
+```{r}
+plsProbs <- predict(plsFit, newdata = Test_data, type = "prob")
+head(plsProbs)
+```
+
+I use a plot to display the result in a best manner.
+
+```{r}
+trellis.par.set(caretTheme())
+plot(plsFit, metric = "Kappa")
+```
+
+The graph shows the connexion between the number of components of the PLS and the resampled area estimate under the ROC curve.
+And then, eventually, I took a look at the matrix of uncertainty and related statistics.
+
+```{r}
+confusionMatrix(plsClasses, Test_data$classe)
+```
+I can apply another model like the "regularized discriminant analysis" model 
+```{r}
+set.seed(123)
+rdaFit <- train(classe ~ ., data = Train_data, method = "rda", tuneGrid = data.frame(gamma = (0:4)/4, lambda = 3/4), trControl = ctrl, metric = "ROC")
+rdaFit
+rdaClasses <- predict(rdaFit, newdata = Test_data)
+confusionMatrix(rdaClasses, Test_data$classe)
+```
+and see how these two models (pls, rda) compare in terms of their resampling results.
+```{r}
+resamps <- resamples(list(pls = plsFit, rda = rdaFit))
+summary(resamps)
+diffs <- diff(resamps)
+summary(diffs)
+```
+And then a plot to visualise the result
+```{r}
+xyplot(resamps, what = "BlandAltman")
+```
+
+I can now also try the "Random Forest" model:
+```{r}
+rfFit <- train(classe~., data=Train_data, method="rf", tuneGrid=expand.grid(.mtry=sqrt(ncol(Train_data[,2:53]))), trControl=ctrl)
+rfFit
+rfClasses <- predict(rfFit, newdata = Test_data)
+confusionMatrix(rfClasses, Test_data$classe)
+```
+
+The accuracy of this model is 99.5%.
+I look closely at the final model and can isolate the variables that make up the model and see this model's confusion matrix with the class.error. The class error is < than 1 percent.
+
+```{r}
+varImp(rfFit)
+rfFit$finalModel
+```
+
+## Conclusion
+
+Now I can try to use this model on my original tasting batch of data and so:
+```{r}
+TestResult <- predict(rfFit, newdata=TestingData)
+TestResult
+```
